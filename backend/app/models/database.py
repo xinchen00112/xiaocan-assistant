@@ -135,6 +135,19 @@ def init_db():
     )
     """)
 
+    # 7. 精简前端用户表 (用户名密码登录，关联小蚕 account_key)
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        role TEXT DEFAULT 'user',
+        default_account_key TEXT,
+        created_at TEXT,
+        updated_at TEXT
+    )
+    """)
+
     # 6. 霸王餐订单表
     c.execute("""
     CREATE TABLE IF NOT EXISTS orders (
@@ -202,7 +215,7 @@ def init_db():
     if "notified_1m" not in apt_cols:
         c.execute("ALTER TABLE store_appointments ADD COLUMN notified_1m INTEGER DEFAULT 0")
     if "check_interval" not in apt_cols:
-        c.execute("ALTER TABLE store_appointments ADD COLUMN check_interval INTEGER DEFAULT 5")
+        c.execute("ALTER TABLE store_appointments ADD COLUMN check_interval INTEGER DEFAULT 30")
     if "platform" not in apt_cols:
         c.execute("ALTER TABLE store_appointments ADD COLUMN platform TEXT DEFAULT 'meituan'")
     if "order_money" not in apt_cols:
@@ -278,6 +291,13 @@ def init_db():
 
     conn.commit()
     conn.close()
+
+    # 种子：初始用户 admin/admin123
+    try:
+        from . import users as users_db
+        users_db.seed_initial_user()
+    except Exception as e:
+        pass
 
 
 # 初始化建表
