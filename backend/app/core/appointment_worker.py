@@ -404,8 +404,8 @@ async def process_active_appointments() -> bool:
                     _append_apt_log(aid, linked_log_id, f"[{t_now}] 店名监听截止时间到达 ({apt.get('until_time')})，监听任务自动结束", sync_db=True, status="error")
                 continue
 
-            # 3. 检查频率 (默认每 check_interval 秒搜索一次，最低 3 秒)
-            interval = max(3, int(apt.get("check_interval") or 5))
+            # 3. 检查频率 (默认 30 秒一次，最低 10 秒 — 避免触发小蚕 WAF 频控)
+            interval = max(10, int(apt.get("check_interval") or 30))
             last_checked = _parse_time_today(apt.get("last_checked_at"))
             if last_checked and (now_ts - last_checked) < interval:
                 continue
@@ -643,8 +643,8 @@ async def process_active_appointments() -> bool:
                     _append_apt_log(aid, linked_log_id, exp_line, sync_db=True, status="error")
                 continue
 
-            # 2. 控制检查频率 (默认每 check_interval 秒检查一次，最低 3 秒)
-            interval = max(3, int(apt.get("check_interval") or 5))
+            # 2. 控制检查频率 (默认 30 秒一次，最低 10 秒 — 避免触发小蚕 WAF 频控)
+            interval = max(10, int(apt.get("check_interval") or 30))
             last_checked = _parse_time_today(apt.get("last_checked_at"))
             if last_checked and (now_ts - last_checked) < interval:
                 continue
@@ -833,7 +833,7 @@ async def process_active_appointments() -> bool:
 
 
 async def _appointment_loop():
-    """后台常驻循环：常态 1.0s 低功耗，有临近秒杀时自适应 20ms 超高精度监测"""
+    """后台常驻循环：常态 3.0s 低功耗，有临近秒杀时自适应 0.5s 高精度监测"""
     logger.info("霸王餐预约与名额监听引擎已启动")
     while _is_running:
         try:
@@ -845,9 +845,9 @@ async def _appointment_loop():
             has_primed = False
 
         if has_primed:
-            await asyncio.sleep(0.02)
+            await asyncio.sleep(0.5)
         else:
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(3.0)
     logger.info("霸王餐预约与名额监听引擎已安全退出")
 
 
