@@ -23,7 +23,18 @@ from ..models import database as db
 from ..core import scheduler, notifier, clawbot_client, time_service
 from ..core.jwt_utils import extract_token_from_text, decode_jwt_payload, extract_city_code_from_text, extract_silk_id_from_payload, extract_user_id_from_payload, extract_silk_id_from_text
 from ..core.proxy_sniffer import sniffer
-from ..core.wechat_scanner import scan_wechat_credentials, wechat_listener
+import sys
+_IS_WINDOWS = sys.platform.startswith("win")
+if _IS_WINDOWS:
+    from ..core.wechat_scanner import scan_wechat_credentials, wechat_listener
+else:
+    # Linux/macOS: 微信内存扫描是 Windows 专属，提供空实现
+    def scan_wechat_credentials(): return None
+    class _DummyListener:
+        def start(self, *a, **kw): pass
+        def stop(self, *a, **kw): pass
+        def get_status(self): return {"status": "unsupported", "is_running": False}
+    wechat_listener = _DummyListener()
 from ..core.tianditu import tianditu_client
 from ..protocol.client import XiaoCanClient, is_waf_blocked, get_waf_cooldown_seconds
 
@@ -3434,6 +3445,22 @@ async def reload_scheduler_jobs_endpoint():
     reload_schedules()
     return {"ok": True, "message": "调度中心任务已重新装载"}
 
+
+@router.get("/cache/stats")
+async def cache_stats_endpoint():
+    """查询 RPC 内存缓存状态"""
+    from ..protocol.cache import cache_stats, cache_list
+    return {"ok": True, "stats": cache_stats(), "entries": cache_list()[:20]}
+
+
+@router.post("/cache/clear")
+async def cache_clear_endpoint():
+    """清空 RPC 内存缓存"""
+    from ..protocol.cache import cache_clear_all, cache_stats
+    before = cache_stats()["total_entries"]
+    cache_clear_all()
+    after = cache_stats()["total_entries"]
+    return {"ok": True, "cleared": before, "remaining": after}
 
 
 @router.post("/orders")
