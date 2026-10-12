@@ -1,8 +1,66 @@
 import axios from 'axios';
 import { Toast } from '@douyinfe/semi-ui';
 import type { Account, AccountDetailData, UserCardItem, TaskItem, StoreItem, StoreAppointment, NameMonitorPayload, JobLog, UserInfo, Order, OrderStats, DashboardChartData, BatchDailyResult, SystemSettings, NotifyTestResult, LocationSearchResult, ClawBotStatus, ClawBotQrResponse, ClawBotPollResponse, ClawBotActivationResponse, AccountNotifyConfig, AccountNotifyResponse, XiaoCanMessagesResponse } from '../types';
+import {
+  getStoreList, verifyToken,
+  type RpcContext,
+} from '../utils/xiaocan-direct';
 
 export const API_BASE = import.meta.env.VITE_API_BASE || '/api';
+
+// ============ 前端直连层 —— 走用户自己的 IP，不经过后端 ============
+// 从 localStorage / 全局 store 拿到当前选中的账号 token、city_code 等上下文
+function buildDirectCtx(key?: string): RpcContext {
+  // 优先用传入的 key 查账号
+  const accountsRaw = localStorage.getItem('xiaocan_accounts');
+  const accounts: Record<string, any> = accountsRaw ? JSON.parse(accountsRaw) : {};
+  let acc = key ? accounts[key] : null;
+  if (!acc) {
+    // 没传 key 就用第一个
+    const firstKey = Object.keys(accounts)[0];
+    acc = firstKey ? accounts[firstKey] : null;
+  }
+  const token: string = acc?.token || acc?.x_sivir || acc?.sivir || '';
+  const cityCode: number = Number(acc?.city_code) || 410100;
+  const silkId: number | undefined = acc?.silk_id != null ? Number(acc.silk_id) : undefined;
+  const userId: number | undefined = acc?.user_id != null ? Number(acc.user_id) : undefined;
+  return { token, cityCode, silkId, userId, platform: (acc?.platform === 'mini' ? 'mini' : 'app') };
+}
+
+async function buildStoreListDirect(params: Record<string, any>, _signal?: AbortSignal) {
+  const accountKey = params.account_key;
+  const ctx = buildDirectCtx(accountKey);
+  const resp = await getStoreList(ctx, {
+    longitude: params.longitude,
+    latitude: params.latitude,
+    city_code: params.city_code || ctx.cityCode,
+    page_pv_id: params.page_pv_id || Math.random().toString(36).slice(2),
+    ...Object.fromEntries(Object.entries(params).filter(([k]) => !['account_key', 'limit', 'offset', 'keyword', 'platform', 'condition', 'rebate_type', 'sort_by'].includes(k))),
+  });
+  const pagePvId = params.page_pv_id || resp.data?.data?.page_pv_id || Math.random().toString(36).slice(2);
+  return {
+    ok: resp.ok,
+    stores: extractStoreList(resp.data),
+    total: extractTotal(resp.data),
+    source: 'direct-browser',
+    from_direct: true,
+    has_more: false,
+    next_offset: 0,
+    page_pv_id: pagePvId,
+    error: resp.ok ? undefined : `直连失败: ${resp.error || resp.rawStatus?.msg}`,
+    // 让类型兼容原来的 endpoint 返回
+    raw_total: extractTotal(resp.data),
+  };
+}
+function extractStoreList(data: any): any[] {
+  if (!data?.data) return [];
+  const d = data.data;
+  return (d.promotion_list || d.feed_list || d.store_list || d.items || []) as any[];
+}
+function extractTotal(data: any): number {
+  const d = data?.data || {};
+  return Number(d.total) || Number(d.count) || 0;
+}
 
 const client = axios.create({
   baseURL: API_BASE,
@@ -81,7 +139,16 @@ export const api = {
   
   // 账号解析与嗅探接入
   parseToken: (rawText: string) => client.post<{ ok: boolean; token?: string; silk_id?: string; is_valid: boolean; message: string; exp_date?: string; city_code?: number; nickname?: string; client_mode?: string }>('/accounts/parse-token', { raw_text: rawText }).then(r => r.data),
-  verifyToken: (token: string, cityCode?: number) => client.post<{ ok: boolean; valid: boolean; message: string }>('/accounts/verify-token', { token, city_code: cityCode }).then(r => r.data),
+  verifyToken: async (token: string, cityCode?: number) => {
+    // 优先前端直连验证
+    try {
+      const result = await verifyToken({ token: token, cityCode: cityCode || 410100 });
+      if (result.ok) {
+        return { ok: true, valid: true, message: '前端直连验证通过（用户自己的 IP）' };
+      }
+    } catch { /* 继续走后端 */ }
+    return client.post<{ ok: boolean; valid: boolean; message: string }>('/accounts/verify-token', { token, city_code: cityCode }).then(r => r.data);
+  },
   startProxyCapture: (port?: number) => client.post<{ ok: boolean; message: string; status: any }>('/accounts/proxy-capture/start', { port }).then(r => r.data),
   stopProxyCapture: () => client.post<{ ok: boolean; message: string; status: any }>('/accounts/proxy-capture/stop').then(r => r.data),
   getProxyCaptureStatus: () => client.get<{ ok: boolean; status: any }>('/accounts/proxy-capture/status').then(r => r.data),
@@ -105,9 +172,14 @@ export const api = {
   runTaskNow: (accountKey: string, taskId: string) => client.post<{ ok: boolean; job_id?: string; output: string }>('/tasks/run', { account_key: accountKey, task_id: taskId }, { timeout: 60000 }).then(r => r.data),
   batchRunDaily: (accountKey: string) => client.post<BatchDailyResult>('/tasks/batch-run-daily', { account_key: accountKey }, { timeout: 60000 }).then(r => r.data),
 
-  // 店铺与附近霸王餐 (支持经纬度、平台、搜索过滤、触底流式分页)
-  getStores: (params?: { city_code?: number; longitude?: string; latitude?: string; account_key?: string; keyword?: string; platform?: string; condition?: string; rebate_type?: string; sort_by?: string; limit?: number; offset?: number; page_pv_id?: string }, signal?: AbortSignal) => 
-    client.get<{ ok: boolean; stores: StoreItem[]; total: number; raw_total?: number; source?: string; has_more?: boolean; next_offset?: number; page_pv_id?: string; keyword?: string; error?: string }>('/store/list', { params, signal }).then(r => r.data),
+  // 店铺与附近霸王餐 (优先前端直连，失败 fallback 后端)
+  getStores: async (params?: { city_code?: number; longitude?: string; latitude?: string; account_key?: string; keyword?: string; platform?: string; condition?: string; rebate_type?: string; sort_by?: string; limit?: number; offset?: number; page_pv_id?: string }, signal?: AbortSignal) => {
+    try {
+      const direct = await buildStoreListDirect(params || {}, signal);
+      if (direct.ok) return direct;
+    } catch { /* fallback 后端 */ }
+    return client.get<{ ok: boolean; stores: StoreItem[]; total: number; raw_total?: number; source?: string; has_more?: boolean; next_offset?: number; page_pv_id?: string; keyword?: string; error?: string }>('/store/list', { params, signal }).then(r => r.data);
+  },
   scanDualRebateStores: (params?: { city_code?: number; longitude?: string; latitude?: string; account_key?: string; platform?: string; keyword?: string; max_stores?: number }) =>
     client.get<{
       ok: boolean;
