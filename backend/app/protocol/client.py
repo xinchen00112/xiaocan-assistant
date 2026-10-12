@@ -7,12 +7,29 @@ import logging
 import time
 import uuid
 from typing import Any, Dict, Optional
-import httpx
+from curl_cffi.requests import AsyncSession
 from .signer import generate_headers
+from .cache import cache_rpc  # 后端内存缓存装饰器，可通过 @cache_rpc(ttl=300) 启用
 
 logger = logging.getLogger("xiaocan.protocol")
 
 GW_BASE_URL = "https://gw.xiaocantech.com/rpc"
+
+# ---------- 小蚕 WAF 全局限速 ----------
+_rate_lock = asyncio.Lock()
+_last_call = 0.0
+_MIN_INTERVAL = 0.8       # 每次 RPC 调用间隔 800ms
+_MAX_CONCURRENT = 2       # 全局最多 2 个并发
+_sem = asyncio.Semaphore(_MAX_CONCURRENT)
+
+
+async def _rate_wait():
+    global _last_call
+    async with _rate_lock:
+        now = asyncio.get_event_loop().time()
+        if now - _last_call < _MIN_INTERVAL:
+            await asyncio.sleep(_MIN_INTERVAL - (now - _last_call))
+        _last_call = asyncio.get_event_loop().time()
 
 
 class XiaoCanRPCError(Exception):
@@ -50,17 +67,10 @@ def clear_waf_block():
 class XiaoCanClient:
     def __init__(self, timeout: float = 10.0):
         self.timeout = timeout
-        client_kwargs: Dict[str, Any] = {
-            "http2": True,
-            "timeout": timeout,
-            "follow_redirects": True,
-            "limits": httpx.Limits(max_connections=50, max_keepalive_connections=20),
-            "trust_env": False
-        }
-        self.session = httpx.AsyncClient(**client_kwargs)
+        self.session = AsyncSession(impersonate="chrome124", timeout=timeout)
 
     async def close(self):
-        await self.session.aclose()
+        await self.session.close()
 
     async def __aenter__(self):
         return self
@@ -105,11 +115,14 @@ class XiaoCanClient:
         )
 
         try:
-            resp = await self.session.post(
-                GW_BASE_URL,
-                json=payload,
-                headers=headers
-            )
+            async with _sem:
+                await _rate_wait()
+                resp = await self.session.post(
+                    GW_BASE_URL,
+                    json=payload,
+                    headers=headers,
+                    impersonate="chrome124"
+                )
             if resp.status_code == 403:
                 is_waf = "WAF" in resp.text or "stgw" in resp.headers.get("server", "").lower()
                 if is_waf:
@@ -165,6 +178,7 @@ class XiaoCanClient:
 
     # ---------------- 核心业务 API 封装 ---------------- #
 
+    @cache_rpc(ttl=120)
     async def get_store_list(
         self,
         city_code: int,
@@ -383,6 +397,7 @@ class XiaoCanClient:
             silk_id=silk_id
         )
 
+    @cache_rpc(ttl=300)
     async def get_user_info(
         self,
         token: str,
@@ -412,6 +427,7 @@ class XiaoCanClient:
 
     # ---------------- 官方任务中心与元宝生态 (ActivityTask / Vip) ---------------- #
 
+    @cache_rpc(ttl=300)
     async def get_user_task_v2(
         self,
         token: str,
@@ -1707,6 +1723,7 @@ class XiaoCanClient:
                 )
             raise rpc_err
 
+    @cache_rpc(ttl=180)
     async def get_user_max_redpack(
         self,
         token: str,
@@ -1974,6 +1991,7 @@ class XiaoCanClient:
             user_id=user_id
         )
 
+    @cache_rpc(ttl=300)
     async def get_user_card_number(
         self,
         token: str,
@@ -1997,6 +2015,7 @@ class XiaoCanClient:
             user_id=user_id
         )
 
+    @cache_rpc(ttl=300)
     async def get_user_card_list(
         self,
         token: str,
@@ -2029,6 +2048,7 @@ class XiaoCanClient:
             logger.warning(f"GetUserCardList failed: {e}")
             return {"status": {"code": 0}, "list": []}
 
+    @cache_rpc(ttl=300)
     async def get_user_redpack_num(
         self,
         token: str,
@@ -2051,6 +2071,7 @@ class XiaoCanClient:
             user_id=user_id
         )
 
+    @cache_rpc(ttl=180)
     async def get_app_redpack_list(
         self,
         token: str,
