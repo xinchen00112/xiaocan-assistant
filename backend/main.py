@@ -17,7 +17,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.api.endpoints import router as api_router
+from app.api.user_endpoints import router_user as user_api_router
 from app.core.scheduler import start_scheduler, shutdown_scheduler
+from app.core.auth import seed_jwt_secret_if_needed
 from app.models.database import init_db
 
 logging.basicConfig(
@@ -31,6 +33,7 @@ logger = logging.getLogger("xiaocan.main")
 async def lifespan(app: FastAPI):
     logger.info("正在启动小蚕助手系统...")
     init_db()
+    seed_jwt_secret_if_needed()
     start_scheduler()
     yield
     logger.info("正在关闭小蚕助手系统...")
@@ -55,6 +58,7 @@ app.add_middleware(
 
 # 挂载 API 路由
 app.include_router(api_router)
+app.include_router(user_api_router)
 
 
 from fastapi.responses import RedirectResponse
@@ -69,7 +73,12 @@ async def root_m_bind(ticket: str = ""):
     return RedirectResponse(f"/api/m/bind?ticket={ticket}")
 
 
-# 若前端已打包 (frontend/dist)，则支持前后端合并一键部署
+# 先挂载更具体的路径，避免被 / catch-all 吞掉
+SLIM_DIST = os.path.join(os.path.dirname(os.path.dirname(__file__)), "slim-frontend-dist")
+if os.path.exists(SLIM_DIST):
+    app.mount("/slim", StaticFiles(directory=SLIM_DIST, html=True), name="slim-frontend")
+
+# 主前端：完整管理后台 (原 xiaocan-assistant 前端)
 FRONTEND_DIST = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist")
 if os.path.exists(FRONTEND_DIST):
     app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
