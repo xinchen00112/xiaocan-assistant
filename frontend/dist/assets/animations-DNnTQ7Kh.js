@@ -1,0 +1,1 @@
+import{n as e,t}from"./vendor-animation-6aUvI8ot.js";e.registerPlugin(t);var n=(t,n=`.gsap-card-item`,r=.02)=>{if(!t)return;let i=t.querySelectorAll(n);i.length&&(e.killTweensOf(i),e.fromTo(i,{opacity:0,y:14},{opacity:1,y:0,duration:.32,stagger:.03,delay:r,ease:`power2.out`,clearProps:`transform,opacity`}))};export{n as t};
