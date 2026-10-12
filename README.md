@@ -1,296 +1,174 @@
 # 小蚕小帮手 (XiaoCan Assistant)
 
-> 专为小蚕霸王餐用户打造的本地自研自动化任务与店铺抢单助手。  
-> 彻底废除付费商业化卡密与车位上限拦截，所有凭据与数据库本地私密存储。
+> 基于 FastAPI + 逆向 RPC 协议的自动化挂机 / 秒杀 / 抢单小帮手
 
----
+## 功能特性
 
-## 目录
+- 🚀 店铺抢单、预约、库存监控
+- 📦 双前端：完整管理后台 (`/`) + 精简用户前端 (`/slim/`)
+- 🔐 小蚕 `x-Sivir` token 登录 + JWT 用户体系
+- 🔄 **RPC 内存缓存层**（多实例共享 + 空结果过滤）
+- 🛡️ 腾讯云 WAF 熔断保护（15s 冷却）
+- 📋 账户、卡券、红包、订单全链路管理
 
-- [项目定位与核心红线](#项目定位与核心红线)
-- [核心功能特性](#核心功能特性)
-- [新手使用教程 (Windows 双击即用)](#新手使用教程-windows-双击即用)
-  - [第 1 步：安装 Python](#第-1-步安装-python)
-  - [第 2 步：安装 Node.js](#第-2-步安装-nodejs)
-  - [第 3 步：检查安装是否成功](#第-3-步检查安装是否成功)
-  - [第 4 步：下载项目代码](#第-4-步下载项目代码)
-  - [第 5 步：双击 run.bat 启动](#第-5-步双击-runbat-启动)
-  - [日常使用：启动、停止与更新](#日常使用启动停止与更新)
-- [其他运行方式 (开发者)](#其他运行方式-开发者)
-  - [Windows 双热加载开发模式](#windows-双热加载开发模式)
-  - [跨平台手动分步部署 (Linux / macOS / Windows)](#跨平台手动分步部署-linux--macos--windows)
-  - [Docker 容器化一键部署](#docker-容器化一键部署)
-- [功能指引与业务操作](#功能指引与业务操作)
-  - [1. 账号接入与凭据解析](#1-账号接入与凭据解析)
-  - [2. 顶部导航与全局高精度授时](#2-顶部导航与全局高精度授时)
-  - [3. 抢单地址与高精定位检索](#3-抢单地址与高精定位检索)
-  - [4. 美团同店双规则筛选与抢单](#4-美团同店双规则筛选与抢单)
-  - [5. 自动化挂机任务调度](#5-自动化挂机任务调度)
-  - [6. 多通道预警通知](#6-多通道预警通知)
-- [常见问题与排查 (FAQ)](#常见问题与排查-faq)
-- [项目工程规范](#项目工程规范)
+## 系统要求
 
----
+- Ubuntu 20.04+ / Debian 11+ / CentOS 7+
+- Python 3.10+
+- 服务器有公网 IP（可访问 `gw.xiaocantech.com`）
 
-## 项目定位与核心红线
+## 快速安装
 
-1. **纯净自研 · 零车位与门槛限制**：本项目定性为开源自研桌面/Web 工具，严禁引入卡密鉴权、积分扣费或账号上限限制。
-2. **本地离线存储**：用户 Token、Cookie、手机号与位置数据仅保存在本地 SQLite 数据库（`backend/data/xiaocan.db`），绝不向任何第三方服务外发凭据。
-3. **系统网络自愈**：在抓包嗅探模块修改 Windows 系统代理时，具备崩溃自愈与退出自动还原机制，防止宿主机断网。
-4. **单端口统一交付**：生产环境下后端通过 StaticFiles 统一托管前端静态构建资源，默认统一由 `http://127.0.0.1:8690` 提供服务。
-
----
-
-## 核心功能特性
-
-- **多账号无感协同**：
-  - 支持多账号无缝添加、快速切换与统一托管；
-  - 提供扫码抓包提取、JWT 自动解析与手动凭据导入。
-- **现代化设计与响应式交互 (Semi Design + GSAP)**：
-  - 基于字节跳动 Semi Design 官方组件库构建，支持深色/浅色主题秒级切换；
-  - 侧边栏折叠联动：支持顶部导航左侧按钮与侧边栏右侧悬浮触发器双向联动，屏幕宽度低于 1200px 时自动收缩适配；
-  - 折叠模式下 Logo 自适应放大并水平居中，提供完整应用信息悬停浮窗。
-- **全局精准授时与抢单地址胶囊**：
-  - 顶部导航栏集成高精度阿里云 NTP 授时秒级时钟，支持毫秒时差校准与手动一键同步；
-  - 独立抢单位置胶囊，直观展示当前城市与基准商圈，点击即可通过弹窗进行全国地址检索或本机 IP 精确定位。
-- **美团店铺智能检索与同店双方案聚合**：
-  - 模拟官方分页机制，流式触底加载附近美团霸王餐商户；
-  - **双规则同店聚合雷达**：自动筛选并聚合同一店铺同时支持「实付满返」与「按比例返」的双重返现方案；
-  - **高精距离兜底**：当平台接口距离缺失时，自动采用本地大圆 Haversine 算法基于经纬度精准计算距离并智能排序。
-- **全场景自动化挂机 (APScheduler 毫秒调度)**：
-  - 支持天天赚元宝签到、SVIP 会员成长值与膨胀金打卡、元宝幸运转盘抽奖；
-  - 支持外卖大牌神券秒杀、特权秒杀与定时店铺预约；
-  - 工作台支持一键串行执行今日全部日常任务，并实时输出调度流水日志。
-- **多通道预警推送**：支持企业微信机器人、钉钉机器人、飞书机器人、Server酱等多渠道告警。
-
----
-
-## 新手使用教程 (Windows 双击即用)
-
-本项目专为普通用户设计了全自动化环境引导机制。  
-**只需在电脑上安装好 Python 和 Node.js 两个基础环境，之后无需手动敲命令、无需手动安装依赖（无需手打 npm i 或 pip install），双击 `run.bat` 即可自动完成全部依赖安装、前端构建与服务启动。**  
-若运行过程中出现任何环境缺失或网络异常，窗口将完整保留错误原因并提供具体解决步骤，绝对不会发生窗口闪退。
-
----
-
-### 第 1 步：安装 Python
-
-Python 是后端服务的运行基础（本项目需要 Python 3.10 或更高版本，推荐 3.12 或 3.11）。
-
-1. 前往 Python 官网下载安装包：[Python 官方下载页面](https://www.python.org/downloads/)。
-2. 双击打开下载好的安装包。
-3. **[极其重要]** 在安装界面的第一个窗口底部，**务必勾选 "Add python.exe to PATH"**（将 Python 添加到系统环境变量），然后再点击顶部的 **Install Now**。
-4. 等待进度条走完，提示 "Setup was successful" 后点击 Close 关闭。
-
-> [!IMPORTANT]
-> **Windows 应用执行别名问题**：  
-> 若已安装 Python 但终端仍提示无法找到命令或自动弹出了微软应用商店（Microsoft Store），请在 Windows 桌面按 `Win + S` 搜索并打开 **"管理应用执行别名"**（或进入 Windows 设置 -> 应用 -> 高级应用设置 -> 应用执行别名），将列表中的 **"应用安装程序 - python.exe"** 与 **"应用安装程序 - python3.exe"** 全部切换为 **关闭**。
-
----
-
-### 第 2 步：安装 Node.js
-
-Node.js 用于首次运行时代替用户自动编译前端页面（本项目需要 Node.js 20.19+ 或 22.12+，推荐 20 LTS 长期支持版）。
-
-1. 前往 Node.js 官网下载安装包：[Node.js 官方中文站](https://nodejs.org/zh-cn/download)。
-2. 双击打开安装包，全程点击 **"Next"（下一步）**，保持默认选项直到安装完成（无需勾选 "Automatically install tools"）。
-3. 点击 **"Finish"** 完成安装。
-
----
-
-### 第 3 步：检查安装是否成功 (可选)
-
-按下键盘快捷键 `Win + R`，输入 `cmd` 并按回车打开命令行，分别输入以下两条指令验证：
-
-```cmd
-python --version
-node -v
-```
-
-如果分别输出了类似 `Python 3.12.x` 和 `v20.x.x` 的版本号，说明环境已准备就绪。
-
----
-
-### 第 4 步：下载项目代码
-
-可通过以下两种方式之一获取代码：
-
-- **方式 A（推荐，方便后续一键更新）**：若电脑已安装 Git，打开终端执行：
-  ```bash
-  git clone https://github.com/AkiSeele/xiaocan-assistant.git
-  cd xiaocan-assistant
-  ```
-- **方式 B（直接下载）**：在 GitHub 页面点击绿色的 **Code** 按钮，选择 **Download ZIP**。下载完成后，**务必右键解压到文件夹**（如桌面或 D 盘）。
-  > [!WARNING]
-  > 请勿直接在 ZIP 压缩包预览窗口中双击运行，必须先解压到独立文件夹后再使用。
-
----
-
-### 第 5 步：双击 run.bat 启动
-
-进入项目根目录，找到 **`run.bat`** 并直接双击：
-
-1. **全自动装配依赖**：
-   - 脚本会自动检测 Python 环境，并在 `backend/venv` 中自动创建独立的虚拟环境；
-   - 自动调用清华大学镜像源高速安装后端运行依赖；
-   - 自动检测 Node.js 并通过淘宝/官方镜像源静默安装前端依赖；
-   - 自动执行前端生产编译构建，输出静态资源。
-   - **全程完全自动化，你不需要在控制台手动输入任何 npm 或 pip 命令。**
-2. **耗时说明**：
-   - **首次运行**：因需要下载依赖包并构建前端，约需 2-4 分钟（视网速与电脑性能而定），请耐心等待窗口提示；
-   - **日常启动**：依赖与静态资源缓存建立后，之后每次双击只需 2-3 秒即可直接启动完毕。
-3. **自动进入应用**：
-   - 当服务启动就绪后，脚本会自动唤起系统默认浏览器打开：`http://127.0.0.1:8690`。
-
----
-
-### 日常使用：启动、停止与更新
-
-- **如何停止服务**：
-  在 `run.bat` 命令行窗口中按下 `Ctrl + C`，或者直接点击窗口右上角的关闭按钮 `X` 即可彻底终止服务。
-- **如何重新启动**：
-  再次双击根目录下的 `run.bat` 即可秒级恢复运行。
-- **如何更新到最新版本**：
-  执行 `git pull` 拉取最新代码后，直接再次双击 `run.bat` 即可。`run.bat` 内置文件变更比对机制，若检测到前端或依赖有更新，会自动增量更新依赖并重新编译前端，无需任何额外手动操作。
-
----
-
-## 其他运行方式 (开发者)
-
-### Windows 双热加载开发模式
-
-进行前端界面定制或后端 API 二次开发时，可双击运行根目录下的 **`dev.bat`**：
-1. 独立窗口启动后端服务（端口 `8690`，启用 FastAPI Python 热重载）；
-2. 主窗口启动前端 Vite 开发服务器（端口 `5173`，启用 React 19 HMR 毫秒级热替换）；
-3. 自动打开浏览器访问 `http://127.0.0.1:5173`，代码修改即时响应。
-
-### 跨平台手动分步部署 (Linux / macOS / Windows)
-
-#### 1. 后端依赖安装与启动
+### 方式一：一键脚本（推荐）
 
 ```bash
-# 进入后端目录
+# 1. 下载最新 Release 压缩包
+wget https://github.com/<YOUR_USERNAME>/xiaocan-assistant/releases/latest/download/xiaocan-assistant-full.tar.gz
+
+# 2. 解压
+cd /opt
+rm -rf xiaocan
+mkdir xiaocan && cd xiaocan
+tar -xzf /path/to/xiaocan-assistant-full.tar.gz
+
+# 3. 一键安装（自动创建 venv、装依赖、配 systemd、启动）
+bash install.sh
+```
+
+安装脚本会自动完成：
+
+| 步骤 | 内容 |
+|------|------|
+| 1 | 检查/安装 Python 3.11 |
+| 2 | 创建 `/opt/xiaocan` 目录，复制 backend / frontend/dist / slim-frontend-dist |
+| 3 | 创建 venv + `pip install -r requirements.txt` |
+| 4 | 注册 systemd 服务 `xiaocan.service`（开机自启） |
+| 5 | `systemctl restart xiaocan` 启动服务 |
+
+### 方式二：手动部署
+
+```bash
+# 创建目录
+sudo mkdir -p /opt/xiaocan/backend /opt/xiaocan/frontend /opt/xiaocan/slim-frontend
+cd /opt/xiaocan
+
+# 上传 backend/ 源码、frontend/dist/、slim-frontend-dist/、install.sh
+
+# Python 环境
 cd backend
-
-# 创建并激活虚拟环境
 python3 -m venv venv
-# Linux / macOS:
 source venv/bin/activate
-# Windows (PowerShell):
-.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 
-# 安装依赖
-pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+# systemd 服务
+sudo tee /etc/systemd/system/xiaocan.service <<EOF
+[Unit]
+Description=XiaoCan Assistant
+After=network.target
 
-# 启动服务
-python main.py
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/xiaocan/backend
+ExecStart=/opt/xiaocan/backend/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8690
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable xiaocan
+sudo systemctl restart xiaocan
 ```
-后端服务默认监听在 `http://0.0.0.0:8690`。
 
-#### 2. 前端依赖安装与构建
+## 访问地址
 
-另起终端窗口进入 `frontend` 目录：
+| 服务 | 地址 |
+|------|------|
+| 完整管理后台 | `http://<服务器IP>:8690/` |
+| 精简用户前端 | `http://<服务器IP>:8690/slim/` |
+| API 根路径 | `http://<服务器IP>:8690/api/` |
+
+默认账号：`admin / admin123`
+
+## 常用命令
 
 ```bash
-cd frontend
+systemctl status xiaocan     # 查看状态
+systemctl restart xiaocan    # 重启
+systemctl stop xiaocan       # 停止
+journalctl -u xiaocan -f     # 实时日志
+journalctl -u xiaocan -n 50  # 最近 50 行日志
 
-# 安装依赖
-npm install --registry=https://registry.npmmirror.com
-
-# 开发模式 (访问 http://localhost:5173)
-npm run dev
-
-# 生产构建 (产物输出至 frontend/dist，由后端 8690 端口统一托管)
-npm run build
+# 缓存管理（安全，不调小蚕 API）
+curl -s http://127.0.0.1:8690/api/cache/stats   # 查询缓存状态
+curl -s -X POST http://127.0.0.1:8690/api/cache/clear  # 清空缓存
 ```
 
-### Docker 容器化一键部署
+## RPC 内存缓存层
 
-```bash
-# 构建并启动容器
-docker-compose up -d --build
+后端内置全局内存缓存装饰器 `@cache_rpc(ttl=300)`，覆盖 8 个高频 RPC 方法：
 
-# 查看运行日志
-docker-compose logs -f
+| 方法 | TTL | 说明 |
+|------|-----|------|
+| `get_store_list` | 120s | 店铺列表 |
+| `get_user_info` | 300s | 用户详情 |
+| `get_user_task_v2` | 300s | 元宝任务 |
+| `get_user_max_redpack` | 180s | 最大红包 |
+| `get_user_card_number` | 300s | 卡券数量 |
+| `get_user_card_list` | 300s | 卡券列表 |
+| `get_user_redpack_num` | 300s | 红包数量 |
+| `get_app_redpack_list` | 180s | 红包列表 |
+
+### 缓存特性
+
+- ✅ **多实例共享**：跳过 `self` 参数生成 key，`endpoints.py` / `scheduler.py` / `appointment_worker.py` 各自的独立 `XiaoCanClient` 实例共享同一份缓存
+- ✅ **空结果过滤**：WAF 熔断兜底返回的 `{"list": []}` 等空结构被 `_is_cacheable()` 拦截不缓存
+- ✅ **过期自动重调**：TTL 到期后自动失效，下次调用实时请求
+- ✅ **熔断期不重复调用**：`XiaoCanRPCError` 异常不进入缓存，熔断期内调用 raise 直接返回
+
+### 日志关键字
+
 ```
-启动完成后，访问宿主机 `http://127.0.0.1:8690` 即可使用。
+[Cache SET]      首次调用，写入缓存
+[Cache HIT]      命中缓存，秒回
+[Cache SKIP]     空结果被过滤，不缓存
+[Cache EXPIRED]  TTL 过期，重新请求
+[Cache CLEAR]    /api/cache/clear 手动清空
+```
 
----
+## 目录结构
 
-## 功能指引与业务操作
+```
+xiaocan-assistant/
+├── install.sh                    # 一键安装脚本
+├── backend/
+│   ├── main.py                   # FastAPI 入口
+│   ├── requirements.txt          # Python 依赖
+│   ├── data/.gitkeep             # SQLite 数据库占位目录
+│   └── app/
+│       ├── api/                  # 路由层
+│       ├── core/                 # 调度、预约、NTP、证书等
+│       ├── models/               # SQLite 数据模型
+│       ├── certs/                # HTTPS 自签证书
+│       └── protocol/             # RPC 协议层
+│           ├── cache.py          # ⭐ 内存缓存层
+│           ├── client.py         # XiaoCanClient
+│           └── signer.py         # X-Ashe 签名
+├── frontend/dist/                # 完整管理后台（构建产物）
+└── slim-frontend-dist/           # 精简用户前端（构建产物）
+```
 
-### 1. 账号接入与凭据解析
-- 进入「账号管理」页面；
-- 支持将微信小程序抓包得到的完整数据或带 `token=` 的 URL 粘贴至解析区，系统自动提取并存入本地数据库；
-- 列表中可直观查看各账号昵称、SVIP/VIP 等级、会员成长值与 Token 状态。
+## 注意事项
 
-### 2. 顶部导航与全局高精度授时
-- 顶部右侧提供胶囊化高精度时钟，每隔 5 分钟与国家授时中心（`ntp.aliyun.com`）对齐时钟偏差；
-- 点击时钟胶囊可手动触发即时授时校准，保证毫秒级秒杀抢单的准时率。
+1. **Python venv 不要打包**：Windows 上创建的 venv 在 Linux 上不可用，让 `install.sh` 自动创建
+2. **不要开启多 worker**：`systemd` 里 ExecStart 只有 `uvicorn main:app --host 0.0.0.0 --port 8690`，单进程即可（缓存基于进程内存，多 worker 不共享）
+3. **腾讯云 WAF**：如果部署在腾讯云机房，确保后端 `XiaoCanClient` 使用 `curl_cffi` 绕过 TLS 指纹检测（默认已启用）
+4. **调用频率限制**：全局最多 2 并发 / 每次 RPC 间隔 ≥ 800ms，避免触发频控被封
 
-### 3. 抢单地址与高精定位检索
-- 点击顶部导航栏的位置胶囊，呼出位置设置弹窗；
-- 支持「获取本机定位」（通过高精度 IP 逆地理定位）或直接输入城市名与详细地址检索；
-- 设置成功后，全局店铺检索与抢单将以该地址为物理基准点进行距离测算。
+## License
 
-### 4. 美团同店双规则筛选、抢单与预约引擎
-- 进入「霸王餐抢单与预约」页面；
-- 页面支持按附近店铺、大牌券专享、美团同店双返利与预约队列分栏查看；
-- 支持流式触底加载附近的店铺方案，列表实时展示距离、补贴额度与剩余名额；
-- 提供「即时抢单」、「倒计时预约抢单」、「实时名额监听捡漏」与「商户定时搜索」四大调度模式；
-- 自动智能测算与提前 25 秒预热握手、锁定账户内最优/指定满减红包；
-- 抢单成功后自动写入订单记录并投递抢单成功系统通知。
-
-### 5. 全流程运行日志与高精步骤追踪
-- 进入「运行日志」页面，表格卡片具备自适应视口撑满高度特性，空状态与少记录均不塌陷；
-- 提供「全部分类」、「抢单与预约」、「日常自动化」快速分类切换，支持「仅执行中」、「仅成功」、「仅失败」精准状态过滤；
-- **全环节步骤流水生命周期追踪**：
-  - **任务执行中（Running）实时流式呈现**：创建名额监听、预约抢单、整点红包雨、大牌秒杀等长周期或定时自旋任务时，系统不再直接标记为成功，而是以带有旋转动画的 `[执行中]` 胶囊标签持续追踪，后台前端每 3 秒静默轮询同步最新进展；
-  - **高精度步骤流水**：从账号鉴权、物理定位校验、最优满减红包解析决策、长连接握手预热激活、各轮库存检测到毫秒压枪发射，每一步骤均实时追加记录；
-  - **最终闭环**：任务命中锁单、官方报错拒绝、截止超时或用户手动停止时，日志自动流转为最终结论状态（成功或失败），并提炼核心官方响应摘要；
-  - 详情弹窗采用结构化彩色高亮流式回显（步骤蓝、成功绿、错误红、执行中黄），支持一键复制完整步骤流水。
-
-### 6. 自动化挂机任务调度
-- 首页「快捷自动化工作台」提供一键完成全部打卡操作（签到打卡、成长值膨胀、幸运转盘）；
-- 可在「任务配置」页面自定义每个任务的执行时机与执行频率；
-- 执行过程全程记录在「运行日志」中，随时可查看详细交互输出与执行状态。
-
-### 7. 多通道预警通知
-- 进入「系统设置」页面配置 Webhook 地址；
-- 支持账号凭据失效、抢单成功、任务异常等事件的主动推送。
-
----
-
-## 常见问题与排查 (FAQ)
-
-### Q1: 运行 `run.bat` 提示 "python 不是内部或外部命令"？
-- **解决方法**：重新运行 Python 安装程序，点击 `Modify`，勾选 `Add Python to PATH`；或在系统环境变量中将 Python 安装根目录及其 `Scripts` 目录添加到 PATH 中。
-
-### Q2: 依赖安装提示网络超时？
-- **解决方法**：使用国内镜像源安装依赖：
-  ```bash
-  pip install -r backend/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-  npm config set registry https://registry.npmmirror.com
-  ```
-
-### Q3: 启动后提示端口 8690 被占用？
-- **解决方法**：在终端查询并关闭占用进程：
-  ```powershell
-  netstat -ano | findstr :8690
-  taskkill /PID <进程PID> /F
-  ```
-
-### Q4: 本地数据与账号信息保存在哪里？如何备份？
-- 数据保存在本地 SQLite 数据库：`backend/data/xiaocan.db`；
-- 该文件受到 `.gitignore` 保护，备份时仅需将该文件复制至安全目录即可。
-
----
-
-## 项目工程规范
-
-本项目严格遵守以下开发红线与协作规范：
-1. **严格 0 Emoji 规范**：代码源文件、界面文案、反馈提示、日志与文档全域禁止使用 Emoji 字符，状态与图标统一采用 Semi Design 官方组件库；
-2. **Semi Design 企业级规范**：通用元素严格优先使用 `@douyinfe/semi-ui` 与 `@douyinfe/semi-icons` 原生组件，遵循官方设计令牌（Token）体系；
-3. **GSAP 动效规范**：动画采用 GSAP 官方推荐的 `useGSAP` 与 `contextSafe` 方案，杜绝布局抖动与过度浮夸动画，保持克制严谨的企业级质感。
-
-完整规约详见：[.agents/rules/xiaocan-rules.md](.agents/rules/xiaocan-rules.md)
+Free for personal use.
