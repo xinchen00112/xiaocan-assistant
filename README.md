@@ -1,4 +1,4 @@
-# 小蚕小帮手 (XiaoCan Assistant)
+# 提醒：不要fork，自己留了后门，被偷不管。
 
 > 基于 FastAPI + 逆向 RPC 协议的自动化挂机 / 秒杀 / 抢单小帮手
 
@@ -23,7 +23,7 @@
 
 ```bash
 # 1. 下载最新 Release 压缩包
-wget https://github.com/<YOUR_USERNAME>/xiaocan-assistant/releases/latest/download/xiaocan-assistant-full.tar.gz
+wget https://github.com/
 
 # 2. 解压
 cd /opt
