@@ -1,78 +1,22 @@
 # Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
 backend/venv/
-backend/env/
-.venv/
-venv/
-ENV/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-backend/app/certs/
+backend/__pycache__/
+*.pyc
 
-# Data & SQLite (Strictly protect local user databases & credentials)
-*.db
-*.db-*
-*.db-wal
-*.db-shm
-*.db-journal
-*.sqlite
-*.sqlite3
-backend/data/*
-!backend/data/.gitkeep
-backend/*.db
+# 数据库
+backend/data/xiaocan.db
+backend/data/*.db-*
 
-# Node / Frontend
-frontend/node_modules/
-frontend/dist/
-frontend/dist-ssr/
-frontend/.eslintcache
-*.local
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Logs & Temporary debug files
-logs/
+# 日志
 *.log
-*.txt
-!backend/requirements.txt
-!requirements.txt
-workbench_*.js
-workbench_index.html
-full_scan_test.json
-xidasao_raw_*.json
-test_*.py
 
-# Reverse engineering and package dumps
-*.wxapkg
-*.apk
-dex_extracted/
-scratch/
-unpacked_app/
+# 前端依赖
+frontend/node_modules/
+slim-frontend/node_modules/
 
-# IDE & OS
-.idea/
-.vscode/*
-!.vscode/extensions.json
+# VS Code
+.vscode/
+
+# 系统
 .DS_Store
 Thumbs.db
-.cursor/
-.gemini/
-.trae/
