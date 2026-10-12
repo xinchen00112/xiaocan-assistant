@@ -4,6 +4,8 @@
 """
 import asyncio
 import logging
+import os
+import random
 import time
 import uuid
 from typing import Any, Dict, Optional
@@ -15,10 +17,36 @@ logger = logging.getLogger("xiaocan.protocol")
 
 GW_BASE_URL = "https://gw.xiaocantech.com/rpc"
 
+# curl_cffi impersonate 指纹池——从中随机选一个，避免 WAF 识别固定 TLS JA3
+# 实测 chrome99 / edge122 等少数版本可能不存在 → 先经过 curl_cffi 验证的稳定版本
+_HTTP_FINGERPRINTS = [
+    "chrome124", "chrome131", "chrome120", "chrome116", "chrome110",
+    "edge101",
+    "safari17_0", "safari15_5",
+]
+
+# Android User-Agent 池（signer 里也有 UA，但我们随机覆盖更散）
+_ANDROID_UAS = [
+    "XiaoCan/3.21.1 (Linux; U; Android 14; zh-cn; Mobile) okhttp/4.12.0",
+    "XiaoCan/3.20.0 (Linux; U; Android 13; zh-cn; Mobile) okhttp/4.11.0",
+    "XiaoCan/3.19.5 (Linux; U; Android 12; zh-cn; Mobile) okhttp/4.10.0",
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 12; HUAWEI Mate 40) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+]
+
+# Accept-Language 池
+_ACCEPT_LANGS = [
+    "zh-CN,zh;q=0.9",
+    "zh-CN,zh-Hans;q=0.9,en;q=0.8",
+    "zh,en-US;q=0.9,en;q=0.8",
+    "zh-CN,zh;q=0.9,en;q=0.8,ja;q=0.7",
+]
+
 # ---------- 小蚕 WAF 全局限速 ----------
 _rate_lock = asyncio.Lock()
 _last_call = 0.0
-_MIN_INTERVAL = 0.8       # 每次 RPC 调用间隔 800ms
+_MIN_INTERVAL = 2.5      # 每次 RPC 调用间隔（秒）——加大到 2.5s 打散请求密度，降低 WAF 行为特征识别
 _MAX_CONCURRENT = 2       # 全局最多 2 个并发
 _sem = asyncio.Semaphore(_MAX_CONCURRENT)
 
@@ -65,9 +93,213 @@ def clear_waf_block():
 
 
 class XiaoCanClient:
+    # 模块级代理池（逗号分隔多 IP，支持自动账号哈希分配）
+    _proxy_pool = None
+    # IP 黑名单: {proxy_url: blocked_until_timestamp}
+    _proxy_blocked_until: Dict[str, float] = {}
+    # IP 连续失败计数（触发黑名单用）
+    _proxy_fail_count: Dict[str, int] = {}
+
+    _PROXY_FAIL_THRESHOLD = 3       # 连续失败 3 次标记为封禁
+    _PROXY_BLOCK_DURATION = 600     # 封禁 10 分钟后自动恢复
+
+    # 自动刷新代理池（全部 IP 被封或全被 WAF 标记时触发）
+    _last_refresh_ts: float = 0.0   # 上次刷新时间戳（防并发频繁拉）
+    _REFRESH_MIN_INTERVAL = 10      # 两次刷新最小间隔（秒）——拉平台 IP 很快，短点没关系
+    _refresh_lock = None            # 刷新锁（asyncio.Lock，延迟初始化）
+    _POOL_FAIL_RATIO_THRESHOLD = 0.8  # 代理池失败比例阈值（超过 80% 有过失败记录就触发刷新）
+
+    # invoke_rpc 内部重试
+    _MAX_RPC_RETRY = 10             # 单次 RPC 最多重试次数（每次重新挑代理 + 新 session）
+                                    # 单 tunnel 模式每次 CONNECT 换出口 IP，需要多试几次撞干净出口
+
     def __init__(self, timeout: float = 10.0):
         self.timeout = timeout
+        self.proxy_pool = self._parse_proxy_pool()
         self.session = AsyncSession(impersonate="chrome124", timeout=timeout)
+
+    @classmethod
+    def _parse_proxy_pool(cls) -> list:
+        """从环境变量 XIAOCAN_PROXY 解析初始代理池"""
+        if cls._proxy_pool is None:
+            raw = os.environ.get("XIAOCAN_PROXY", "").strip()
+            if raw:
+                pool = [p.strip() for p in raw.split(",") if p.strip()]
+                if pool:
+                    cls._proxy_pool = pool
+                    logger.info(f"代理池已加载: {len(pool)} 个 IP")
+                else:
+                    cls._proxy_pool = []
+            else:
+                cls._proxy_pool = []
+        return cls._proxy_pool
+
+    @classmethod
+    def _refresh_proxy_pool(cls) -> bool:
+        """从代理池 URL 拉取新 IP，替换当前池。返回是否刷新成功。
+        环境变量:
+          XIAOCAN_PROXY_POOL_URL: 代理池拉取地址（JSON 格式）
+          XIAOCAN_PROXY_USER: 可选，Basic Auth 用户名（若 URL 里没嵌 user:pass）
+          XIAOCAN_PROXY_PASS: 可选，Basic Auth 密码
+        """
+        import urllib.request as urllib
+        import json as _json
+
+        pool_url = os.environ.get("XIAOCAN_PROXY_POOL_URL", "").strip()
+        if not pool_url:
+            logger.warning("未配置 XIAOCAN_PROXY_POOL_URL，无法自动刷新代理池")
+            return False
+
+        import time as _time
+        now = _time.time()
+        if now - cls._last_refresh_ts < cls._REFRESH_MIN_INTERVAL:
+            logger.info(f"代理池距离上次刷新不足 {cls._REFRESH_MIN_INTERVAL}s，跳过本次刷新")
+            return False
+
+        try:
+            logger.warning(f"代理池全部被封，开始从平台拉取新 IP: {pool_url[:80]}...")
+            req = urllib.Request(pool_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.urlopen(req, timeout=15) as resp:
+                data = _json.loads(resp.read().decode())
+
+            items = data.get("data", [])
+            new_pool = []
+            for item in items:
+                ip_port = item.get("server", "")
+                if not ip_port:
+                    continue
+                # 如果 URL 里没嵌认证，用环境变量里的 user/pass 拼
+                proxy_user = os.environ.get("XIAOCAN_PROXY_USER", "").strip()
+                proxy_pass = os.environ.get("XIAOCAN_PROXY_PASS", "").strip()
+                if proxy_user and proxy_pass and "@" not in ip_port:
+                    new_pool.append(f"http://{proxy_user}:{proxy_pass}@{ip_port}")
+                elif "@" in ip_port or ip_port.startswith("http://") or ip_port.startswith("https://"):
+                    new_pool.append(ip_port if ip_port.startswith("http") else f"http://{ip_port}")
+                else:
+                    new_pool.append(f"http://{ip_port}")
+
+            if not new_pool:
+                logger.warning("代理池平台返回空数据，刷新失败")
+                return False
+
+            # 替换池 + 清空旧的黑名单/失败计数
+            old_count = len(cls._proxy_pool) if cls._proxy_pool else 0
+            cls._proxy_pool = new_pool
+            cls._proxy_blocked_until = {}
+            cls._proxy_fail_count = {}
+            cls._last_refresh_ts = now
+
+            logger.info(f"✅ 代理池刷新成功: {old_count} → {len(new_pool)} 个新 IP")
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ 代理池刷新失败: {type(e).__name__}: {str(e)[:150]}")
+            return False
+
+    @classmethod
+    def _is_proxy_blocked(cls, proxy: str) -> bool:
+        import time
+        until = cls._proxy_blocked_until.get(proxy, 0)
+        if until and time.time() >= until:
+            # 封禁到期，自动解除
+            cls._proxy_blocked_until.pop(proxy, None)
+            cls._proxy_fail_count.pop(proxy, None)
+            logger.info(f"代理 {proxy} 封禁到期，自动恢复")
+            return False
+        return bool(until)
+
+    @classmethod
+    def _mark_proxy_blocked(cls, proxy: str, reason: str = ""):
+        import time
+        cls._proxy_blocked_until[proxy] = time.time() + cls._PROXY_BLOCK_DURATION
+        logger.warning(f"代理 {proxy} 已封禁 {cls._PROXY_BLOCK_DURATION}s (原因: {reason})")
+
+    @classmethod
+    def _is_pool_all_failing(cls) -> bool:
+        """判断代理池是否大部分 IP 都处于不可用状态。
+        判定条件：有失败记录 或 已封禁 的 IP 数占池总数 ≥ 80%
+        （这样避免"5 个 IP 中 4 个即将封、1 个完全没碰过"的场景被误判为"池还能用"）
+        """
+        pool = cls._proxy_pool or []
+        if not pool:
+            return False
+        failing_count = 0
+        for p in pool:
+            if cls._is_proxy_blocked(p) or cls._proxy_fail_count.get(p, 0) > 0:
+                failing_count += 1
+        ratio = failing_count / len(pool)
+        if ratio >= cls._POOL_FAIL_RATIO_THRESHOLD:
+            logger.info(f"代理池失败比例 {ratio:.0%} ({failing_count}/{len(pool)}) ≥ {cls._POOL_FAIL_RATIO_THRESHOLD:.0%}，判定为需要刷新")
+            return True
+        return False
+
+    def _pick_proxy(self, salt: str = "") -> Optional[str]:
+        """根据账号标识哈希分配固定代理，被封时自动切换到下一个；全部被封或全被 WAF 标记时自动刷新代理池"""
+        # 每次都从类属性同步最新池（刷新会改类属性，实例属性要同步）
+        self.proxy_pool = type(self)._proxy_pool or []
+        pool = self.proxy_pool
+
+        if not pool:
+            # 池为空 → 首次启动或刷新失败过，尝试刷新
+            logger.warning("代理池为空，触发自动初始化刷新...")
+            refreshed = self._refresh_proxy_pool()
+            if refreshed:
+                self.proxy_pool = type(self)._proxy_pool or []
+                pool = self.proxy_pool
+                if not pool:
+                    return None
+            else:
+                return None
+
+        if len(pool) == 1:
+            # 单 IP 模式，被封了只能用它
+            return pool[0]
+
+        # ---- 先检查：池里是否所有 IP 都被 WAF 标记了？全中直接刷新 ----
+        if self._is_pool_all_failing():
+            logger.warning(f"代理池 {len(pool)} 个 IP 全部被 WAF 标记，触发自动刷新拉新 IP...")
+            refreshed = self._refresh_proxy_pool()
+            if refreshed:
+                self.proxy_pool = type(self)._proxy_pool or []
+                pool = self.proxy_pool
+                if not pool:
+                    return None
+            else:
+                # 刷新失败 → 继续用当前池（等旧封禁自动解封）
+                logger.warning("刷新失败，继续使用当前池")
+
+        import hashlib
+        base_idx = int(hashlib.md5(salt.encode()).hexdigest(), 16) % len(pool)
+
+        # 从哈希起始位置找第一个没被封的 IP
+        for offset in range(len(pool)):
+            idx = (base_idx + offset) % len(pool)
+            proxy = pool[idx]
+            if not self._is_proxy_blocked(proxy):
+                if offset > 0:
+                    logger.warning(f"账号哈希 IP {pool[base_idx]} 已封，自动切换到 {proxy}")
+                return proxy
+
+        # ---- 兜底：全部被封了，尝试自动刷新 ----
+        logger.warning(f"代理池全部被封 ({len(pool)} 个)，触发自动刷新...")
+        refreshed = self._refresh_proxy_pool()
+
+        if refreshed:
+            # 刷新成功 → 用新池重新哈希挑一个
+            self.proxy_pool = type(self)._proxy_pool or []
+            pool = self.proxy_pool
+            base_idx = int(hashlib.md5(salt.encode()).hexdigest(), 16) % len(pool)
+            for offset in range(len(pool)):
+                idx = (base_idx + offset) % len(pool)
+                proxy = pool[idx]
+                if not self._is_proxy_blocked(proxy):
+                    logger.info(f"刷新后自动切换到新 IP: {proxy}")
+                    return proxy
+            return pool[base_idx]
+        else:
+            # 刷新失败 → 还是用原来的兜底逻辑（等自动解封）
+            logger.warning(f"刷新失败，账号 {salt[:20]} 回退到哈希 IP，等待封禁自动解封")
+            return pool[base_idx]
 
     async def close(self):
         await self.session.close()
@@ -89,92 +321,161 @@ class XiaoCanClient:
         silk_id: Optional[str] = None,
         platform: Optional[str] = "app"
     ) -> Dict[str, Any]:
-        # 1. 前置熔断保护：若当前网络处于腾讯云 WAF 冷却期，阻止盲发以防重置封锁计时
-        if is_waf_blocked():
-            remain_sec = get_waf_cooldown_seconds()
-            raise XiaoCanRPCError(
-                code=403,
-                msg=f"当前网络IP处于官方腾讯云WAF临时频次拦截保护冷却中（剩余约 {remain_sec} 秒），系统已自动熔断休眠以避免延长封禁。如需立即恢复，请切换手机热点、重启光猫更换IP或等待冷却。"
-            )
+        """发起 RPC 请求，内置代理自动重试：
+        - WAF 403 / 代理异常 → 自动换代理 + 新 session 重试，最多 _MAX_RPC_RETRY 次
+        - 业务层错误（token 过期、参数错误等）→ 不重试，直接 raise
+        """
+        salt = f"{token}|{silk_id}|{user_id}"
+        last_error = None
 
-        payload = dict(body) if body else {}
-        plat = (platform or "app").lower()
-        if plat == "mini":
-            payload["app_id"] = 20
-        else:
-            payload["app_id"] = 10
+        for attempt in range(self._MAX_RPC_RETRY):
+            # 每次重试重新挑代理（多池模式会自动避开已封 / 已失败的）
+            proxy = self._pick_proxy(salt)
+            has_proxy = bool(proxy)
 
-        headers = generate_headers(
-            server_name=server_name,
-            method_name=method_name,
-            city_code=city_code,
-            token=token,
-            user_id=user_id,
-            silk_id=silk_id,
-            platform=plat
-        )
-
-        try:
-            async with _sem:
-                await _rate_wait()
-                resp = await self.session.post(
-                    GW_BASE_URL,
-                    json=payload,
-                    headers=headers,
-                    impersonate="chrome124"
+            # 前置熔断保护（仅无代理时触发：家宽 IP 直连被 WAF 拦时保护不被延长封禁）
+            if not has_proxy and is_waf_blocked():
+                remain_sec = get_waf_cooldown_seconds()
+                raise XiaoCanRPCError(
+                    code=403,
+                    msg=f"当前网络IP处于官方腾讯云WAF临时频次拦截保护冷却中（剩余约 {remain_sec} 秒），系统已自动熔断休眠以避免延长封禁。如需立即恢复，请切换手机热点、重启光猫更换IP或等待冷却。"
                 )
-            if resp.status_code == 403:
-                is_waf = "WAF" in resp.text or "stgw" in resp.headers.get("server", "").lower()
-                if is_waf:
-                    mark_waf_blocked(duration_seconds=15)
-                hint = "已被腾讯云 WAF 防火墙拦截 [403 Forbidden]，系统已进入 15 秒频次缓冲。通常原因是：开启了海外代理/VPN/TUN模式，或当前IP触发了频控防护。请关闭全局代理、切换手机热点或稍后重试" if is_waf else "请求被服务器拒绝 [403 Forbidden]"
-                logger.error(f"RPC {server_name}.{method_name} 访问受阻: {hint}")
-                raise XiaoCanRPCError(code=403, msg=hint, raw={"status_code": 403, "text": resp.text[:200]})
 
-            if resp.status_code != 200:
-                logger.error(f"RPC {server_name}.{method_name} HTTP {resp.status_code} 异常响应: {resp.text[:200]}")
-                raise XiaoCanRPCError(code=resp.status_code, msg=f"HTTP {resp.status_code} 异常", raw={"status_code": resp.status_code, "text": resp.text[:200]})
-
-            data = resp.json()
-        except XiaoCanRPCError:
-            raise
-        except Exception as e:
-            logger.error(f"RPC {server_name}.{method_name} network failure: {e}")
-            raise
-
-        # 1. 检查网关返回的顶层 error (例如 Go micro 500/400 异常)
-        if "error" in data:
-            err_raw = data.get("error")
-            err_code = 500
-            err_msg = str(err_raw)
-            if isinstance(err_raw, str) and err_raw.startswith("{"):
-                try:
-                    import json
-                    parsed_err = json.loads(err_raw)
-                    err_code = parsed_err.get("code", 500)
-                    err_msg = parsed_err.get("detail") or parsed_err.get("status") or str(err_raw)
-                except Exception:
-                    pass
-            logger.error(f"RPC {server_name}.{method_name} gateway error: code={err_code}, msg={err_msg}")
-            raise XiaoCanRPCError(code=err_code, msg=err_msg, raw=data)
-
-        # 2. 检查业务层 status 结构
-        status = data.get("status") or {}
-        if isinstance(status, dict):
-            code = status.get("code", 0)
-            msg = status.get("msg", "ok")
-        else:
-            code = data.get("code", 500) if isinstance(data.get("code"), int) else 500
-            msg = str(status or data.get("detail") or data.get("msg") or "RPC Error")
-
-        if code != 0:
-            if code in (3, 25, 40002, 40003, 40004, 40037, 40038, 40039, 40040):
-                logger.info(f"RPC {server_name}.{method_name} notice: code={code}, msg={msg}")
+            payload = dict(body) if body else {}
+            plat = (platform or "app").lower()
+            if plat == "mini":
+                payload["app_id"] = 20
             else:
-                logger.warning(f"RPC {server_name}.{method_name} rejected: code={code}, msg={msg}")
-            raise XiaoCanRPCError(code=code, msg=msg, raw=data)
+                payload["app_id"] = 10
 
-        return data
+            headers = generate_headers(
+                server_name=server_name,
+                method_name=method_name,
+                city_code=city_code,
+                token=token,
+                user_id=user_id,
+                silk_id=silk_id,
+                platform=plat
+            )
+            # --- 随机化 header 打散 WAF 特征 ---
+            headers["User-Agent"] = random.choice(_ANDROID_UAS)
+            headers["Accept-Language"] = random.choice(_ACCEPT_LANGS)
+
+            try:
+                async with _sem:
+                    await _rate_wait()
+                    proxy_kwargs = {"proxies": {"http": proxy, "https": proxy}} if proxy else {}
+                    # 每次重试：随机 HTTP 指纹 + 新 session = 新 TLS JA3 + 新 CONNECT 出口
+                    fingerprint = random.choice(_HTTP_FINGERPRINTS)
+                    async with AsyncSession(impersonate=fingerprint, timeout=self.timeout) as temp_session:
+                        resp = await temp_session.post(
+                            GW_BASE_URL,
+                            json=payload,
+                            headers=headers,
+                            **proxy_kwargs
+                        )
+
+                # --- 响应处理 ---
+
+                if resp.status_code == 403:
+                    is_waf = "WAF" in resp.text or "stgw" in resp.headers.get("server", "").lower()
+                    if is_waf:
+                        if not has_proxy:
+                            mark_waf_blocked(duration_seconds=15)
+                        # 仅多 IP 池模式做封禁计数；单 tunnel 每次 CONNECT 换出口，封 tunnel 本身无意义
+                        if proxy and len(self.proxy_pool or []) > 1:
+                            self._proxy_fail_count[proxy] = self._proxy_fail_count.get(proxy, 0) + 1
+                            if self._proxy_fail_count[proxy] >= self._PROXY_FAIL_THRESHOLD:
+                                self._mark_proxy_blocked(proxy, reason="WAF 403 连续触发")
+
+                    hint = "已被腾讯云 WAF 防火墙拦截 [403 Forbidden]" + ("（家宽直连，已进入 15 秒频次缓冲）" if not has_proxy else f"（代理 {proxy[:40]}）")
+                    last_error = XiaoCanRPCError(code=403, msg=hint, raw={"status_code": 403, "text": resp.text[:200]})
+
+                    if attempt < self._MAX_RPC_RETRY - 1:
+                        logger.warning(f"RPC {server_name}.{method_name} 第{attempt+1}/{self._MAX_RPC_RETRY}次 WAF 403，自动切换下一个代理重试...")
+                        await asyncio.sleep(0.3)
+                        continue
+
+                    logger.error(f"RPC {server_name}.{method_name} 连续 {self._MAX_RPC_RETRY} 次 WAF 403，放弃重试")
+                    raise last_error
+
+                if resp.status_code != 200:
+                    # 非 200 非 403（500/401/404 等）→ 不重试，业务/服务端问题
+                    logger.error(f"RPC {server_name}.{method_name} HTTP {resp.status_code} 异常响应: {resp.text[:200]}")
+                    raise XiaoCanRPCError(code=resp.status_code, msg=f"HTTP {resp.status_code} 异常", raw={"status_code": resp.status_code, "text": resp.text[:200]})
+
+                # HTTP 200 → 解析 JSON
+                data = resp.json()
+                # 成功 → 清掉这个代理的失败计数
+                if proxy and proxy in self._proxy_fail_count:
+                    self._proxy_fail_count.pop(proxy, None)
+
+                # ---- 业务层错误检查（只在 HTTP 200 + JSON 解析成功后做，不重试）----
+
+                # 1. 检查网关返回的顶层 error (例如 Go micro 500/400 异常)
+                if "error" in data:
+                    err_raw = data.get("error")
+                    err_code = 500
+                    err_msg = str(err_raw)
+                    if isinstance(err_raw, str) and err_raw.startswith("{"):
+                        try:
+                            import json
+                            parsed_err = json.loads(err_raw)
+                            err_code = parsed_err.get("code", 500)
+                            err_msg = parsed_err.get("detail") or parsed_err.get("status") or str(err_raw)
+                        except Exception:
+                            pass
+                    logger.error(f"RPC {server_name}.{method_name} gateway error: code={err_code}, msg={err_msg}")
+                    raise XiaoCanRPCError(code=err_code, msg=err_msg, raw=data)
+
+                # 2. 检查业务层 status 结构
+                status = data.get("status") or {}
+                if isinstance(status, dict):
+                    code = status.get("code", 0)
+                    msg = status.get("msg", "ok")
+                else:
+                    code = data.get("code", 500) if isinstance(data.get("code"), int) else 500
+                    msg = str(status or data.get("detail") or data.get("msg") or "RPC Error")
+
+                if code != 0:
+                    if code in (3, 25, 40002, 40003, 40004, 40037, 40038, 40039, 40040):
+                        logger.info(f"RPC {server_name}.{method_name} notice: code={code}, msg={msg}")
+                    else:
+                        logger.warning(f"RPC {server_name}.{method_name} rejected: code={code}, msg={msg}")
+                    raise XiaoCanRPCError(code=code, msg=msg, raw=data)
+
+                # ---- 成功 ----
+                return data
+
+            except XiaoCanRPCError:
+                # 业务错误直接 raise（包括上面非 200、网关 error、业务 status.code != 0）
+                # 只有 WAF 403 会在上层处理并重试到这里才 raise
+                raise
+            except Exception as e:
+                # 网络异常 / JSON 解析失败 / 代理连接失败 → 标记代理 + 重试
+                err_str = str(e).lower()
+                is_proxy_issue = (
+                    "connect" in err_str
+                    or "timeout" in err_str
+                    or "proxy" in err_str
+                    or "expecting value" in err_str
+                    or "json" in err_str
+                    or "jsondecode" in err_str
+                )
+                if proxy and is_proxy_issue and len(self.proxy_pool or []) > 1:
+                    self._proxy_fail_count[proxy] = self._proxy_fail_count.get(proxy, 0) + 1
+                    if self._proxy_fail_count[proxy] >= self._PROXY_FAIL_THRESHOLD:
+                        self._mark_proxy_blocked(proxy, reason=f"代理异常: {str(e)[:80]}")
+
+                last_error = e
+
+                if attempt < self._MAX_RPC_RETRY - 1:
+                    logger.warning(f"RPC {server_name}.{method_name} 第{attempt+1}/{self._MAX_RPC_RETRY}次异常({type(e).__name__}: {str(e)[:60]})，自动重试...")
+                    await asyncio.sleep(0.3)
+                    continue
+
+                logger.error(f"RPC {server_name}.{method_name} 连续 {self._MAX_RPC_RETRY} 次异常，放弃: {e}")
+                raise
 
     # ---------------- 核心业务 API 封装 ---------------- #
 
