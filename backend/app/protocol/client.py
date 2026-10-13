@@ -17,22 +17,22 @@ logger = logging.getLogger("xiaocan.protocol")
 
 GW_BASE_URL = "https://gw.xiaocantech.com/rpc"
 
-# curl_cffi impersonate 指纹池——从中随机选一个，避免 WAF 识别固定 TLS JA3
-# 实测 chrome99 / edge122 等少数版本可能不存在 → 先经过 curl_cffi 验证的稳定版本
+# curl_cffi impersonate 指纹池——全用移动端指纹，和 APP 原生 TLS JA3 一致
+# 禁止桌面指纹（chrome/edge/safari），避免 TLS JA3 与 UA/headers 元数据矛盾
 _HTTP_FINGERPRINTS = [
-    "chrome124", "chrome131", "chrome120", "chrome116", "chrome110",
-    "edge101",
-    "safari17_0", "safari15_5",
+    "chrome99_android", "chrome131_android",
+    "chrome99_android", "chrome131_android",  # 权重重放，多选中 Android 指纹
 ]
 
-# Android User-Agent 池（signer 里也有 UA，但我们随机覆盖更散）
+# Android User-Agent 池——全用小蚕官方 APP 原生 UA（okhttp 签名），和 TLS chrome*_android 指纹严格对齐
+# 禁止 Chrome Mobile / Safari 等浏览器 UA，避免 UA 与 TLS JA3 指纹类型矛盾
 _ANDROID_UAS = [
     "XiaoCan/3.21.1 (Linux; U; Android 14; zh-cn; Mobile) okhttp/4.12.0",
+    "XiaoCan/3.21.1 (Linux; U; Android 14; zh-cn; Mobile) okhttp/4.12.0",  # 主力版本多放几次
+    "XiaoCan/3.20.5 (Linux; U; Android 13; zh-cn; Mobile) okhttp/4.11.0",
     "XiaoCan/3.20.0 (Linux; U; Android 13; zh-cn; Mobile) okhttp/4.11.0",
     "XiaoCan/3.19.5 (Linux; U; Android 12; zh-cn; Mobile) okhttp/4.10.0",
-    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
-    "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
-    "Mozilla/5.0 (Linux; Android 12; HUAWEI Mate 40) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+    "XiaoCan/3.19.0 (Linux; U; Android 12; zh-cn; Mobile) okhttp/4.10.0",
 ]
 
 # Accept-Language 池
@@ -116,7 +116,8 @@ class XiaoCanClient:
     def __init__(self, timeout: float = 10.0):
         self.timeout = timeout
         self.proxy_pool = self._parse_proxy_pool()
-        self.session = AsyncSession(impersonate="chrome124", timeout=timeout)
+        # 默认用 Android 移动端指纹，和 APP 原生 TLS JA3 一致
+        self.session = AsyncSession(impersonate="chrome99_android", timeout=timeout)
 
     @classmethod
     def _parse_proxy_pool(cls) -> list:
@@ -324,9 +325,16 @@ class XiaoCanClient:
         """发起 RPC 请求，内置代理自动重试：
         - WAF 403 / 代理异常 → 自动换代理 + 新 session 重试，最多 _MAX_RPC_RETRY 次
         - 业务层错误（token 过期、参数错误等）→ 不重试，直接 raise
+        - 每次请求带固定 device_id（按账号哈希生成，模拟真实 Android 设备标识）
         """
         salt = f"{token}|{silk_id}|{user_id}"
         last_error = None
+
+        # --- 生成固定 device_id：同一账号每次相同，不同账号不同
+        # 模拟 Android ID（16 位 hex），真实设备所有请求带同一个值
+        import hashlib as _hashlib
+        device_seed = token or silk_id or user_id or salt
+        device_id = _hashlib.md5(f"xiaocan_device:{device_seed}".encode()).hexdigest()[:16]
 
         for attempt in range(self._MAX_RPC_RETRY):
             # 每次重试重新挑代理（多池模式会自动避开已封 / 已失败的）
@@ -348,6 +356,10 @@ class XiaoCanClient:
             else:
                 payload["app_id"] = 10
 
+            # --- device_id 同时放进 payload（body 外的顶层）和 headers ---
+            payload["device_id"] = device_id
+            payload["deviceId"] = device_id
+
             headers = generate_headers(
                 server_name=server_name,
                 method_name=method_name,
@@ -355,11 +367,14 @@ class XiaoCanClient:
                 token=token,
                 user_id=user_id,
                 silk_id=silk_id,
-                platform=plat
+                platform=plat,
+                device_id=device_id,
             )
             # --- 随机化 header 打散 WAF 特征 ---
             headers["User-Agent"] = random.choice(_ANDROID_UAS)
             headers["Accept-Language"] = random.choice(_ACCEPT_LANGS)
+            # device_id 也放进 header（signer 已放，这里额外确认）
+            headers["device_id"] = device_id
 
             try:
                 async with _sem:
