@@ -36,7 +36,8 @@ def generate_headers(
     silk_id: Optional[str] = None,
     nami: Optional[str] = None,
     time_millis: Optional[int] = None,
-    platform: str = "app"
+    platform: str = "app",
+    device_id: Optional[str] = None,
 ) -> Dict[str, str]:
     """
     生成小蚕霸王餐网关调用所需的全部请求头 (英雄联盟特征头规范)
@@ -94,6 +95,9 @@ def generate_headers(
         headers["X-CityCode"] = str(city_code)
         headers["X-Model"] = "Android Phone"
         headers["User-Agent"] = "XiaoCan/3.21.1 (Linux; U; Android 14; zh-cn; Mobile) okhttp/4.12.0"
+        if device_id:
+            headers["device_id"] = device_id
+            headers["X-Device-Id"] = device_id
 
     if user_id:
         headers["x-Vayne"] = str(user_id)
